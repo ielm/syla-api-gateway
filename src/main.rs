@@ -16,8 +16,11 @@ use tower_http::{
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
+mod auth;
 mod error;
 mod execution;
+mod grpc;
+mod proto;
 mod state;
 
 use error::ApiError;
@@ -44,8 +47,34 @@ async fn main() -> Result<()> {
     // Initialize application state
     let state = Arc::new(AppState::new().await?);
 
-    // Build router
-    let app = Router::new()
+    // Get configuration
+    let rest_port = std::env::var("REST_PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse::<u16>()
+        .expect("Invalid REST_PORT");
+    
+    let grpc_port = std::env::var("GRPC_PORT")
+        .unwrap_or_else(|_| "8081".to_string())
+        .parse::<u16>()
+        .expect("Invalid GRPC_PORT");
+
+    let auth_service_url = std::env::var("AUTH_SERVICE_URL")
+        .unwrap_or_else(|_| "http://localhost:8085".to_string());
+    
+    let skip_auth = std::env::var("SKIP_AUTH")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+
+    // Create auth interceptor
+    let auth_interceptor = auth::AuthInterceptor::new(auth_service_url, skip_auth);
+
+    // Create gRPC service
+    let grpc_service = grpc::SylaGatewayService::new(state.clone(), auth_interceptor);
+    let grpc_server = proto::SylaGatewayServer::new(grpc_service);
+
+    // Build REST router
+    let rest_app = Router::new()
         .route("/health", get(health_handler))
         .route("/v1/executions", post(create_execution))
         .route("/v1/executions/:id", get(get_execution))
@@ -55,16 +84,34 @@ async fn main() -> Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    // Start server
-    let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string())
-        .parse::<u16>()
-        .expect("Invalid PORT");
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    tracing::info!("Starting API gateway on {}", addr);
-    
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // Start both servers
+    let rest_addr = SocketAddr::from(([0, 0, 0, 0], rest_port));
+    let grpc_addr = SocketAddr::from(([0, 0, 0, 0], grpc_port));
+
+    tracing::info!("Starting REST API on {}", rest_addr);
+    tracing::info!("Starting gRPC API on {}", grpc_addr);
+
+    // Spawn REST server
+    let rest_handle = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(rest_addr)
+            .await
+            .expect("Failed to bind REST listener");
+        axum::serve(listener, rest_app)
+            .await
+            .expect("REST server failed");
+    });
+
+    // Spawn gRPC server
+    let grpc_handle = tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(grpc_server)
+            .serve(grpc_addr)
+            .await
+            .expect("gRPC server failed");
+    });
+
+    // Wait for both servers
+    tokio::try_join!(rest_handle, grpc_handle)?;
 
     Ok(())
 }
