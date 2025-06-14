@@ -4,7 +4,7 @@ use std::path::PathBuf;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Print build info for debugging
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=../../proto/syla.proto");
+    println!("cargo:rerun-if-changed=proto/syla.proto");
     
     // Get OUT_DIR from cargo
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
@@ -28,11 +28,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .type_attribute("syla.v1.HealthCheckResponse.HealthStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Compile the proto files
         .compile_protos(
-            &["../../proto/syla.proto"],
-            &[
-                "../../proto",                    // Local proto directory
-                "../../proto-deps/googleapis",     // Google APIs
-            ],
+            &["proto/syla.proto"],
+            &["proto"],  // Now includes google and common via symlinks
         )?;
     
     // Generate a mod.rs file in OUT_DIR that properly includes the generated code

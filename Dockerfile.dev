@@ -1,0 +1,25 @@
+# Development Dockerfile for API Gateway
+# Includes cargo-watch for hot reload
+
+FROM rust:1.75
+
+WORKDIR /app
+
+# Install development tools
+RUN cargo install cargo-watch
+
+# Install protoc
+RUN apt-get update && \
+    apt-get install -y protobuf-compiler && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy only Cargo files first for better caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create src directory with dummy main to cache dependencies
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release && rm -rf src
+
+# The actual source will be mounted as a volume
+# Default command is overridden in docker-compose.dev.yml
+CMD ["cargo", "run"]
