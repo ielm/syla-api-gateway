@@ -13,7 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_out = out_dir.join("proto");
     std::fs::create_dir_all(&proto_out)?;
     
-    // Configure tonic-build with proper settings
+    // Configure tonic-build for API Gateway proto
     tonic_build::configure()
         .build_server(true)
         .build_client(true)
@@ -30,6 +30,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compile_protos(
             &["proto/syla.proto"],
             &["proto"],  // Now includes google and common via symlinks
+        )?;
+    
+    // Also compile execution service proto for client use
+    println!("cargo:rerun-if-changed=proto/execution.proto");
+    
+    tonic_build::configure()
+        .build_server(false)
+        .build_client(true)
+        .out_dir(&out_dir)
+        // Add serde derives to enums only
+        .type_attribute("syla.execution.v1.Language", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("syla.execution.v1.ExecutionMode", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("syla.execution.v1.ExecutionStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("syla.execution.v1.OutputType", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("syla.execution.v1.WorkerStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("syla.common.v1.HealthStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .compile_protos(
+            &["proto/execution.proto"],
+            &["proto"],
         )?;
     
     // Generate a mod.rs file in OUT_DIR that properly includes the generated code

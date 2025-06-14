@@ -1,46 +1,14 @@
+use crate::clients::execution::ExecutionClient;
 use crate::error::ApiError;
-use crate::execution::{CreateExecutionRequest, ExecutionResponse, ExecutionResult, ExecutionStatus};
+use crate::execution::{CreateExecutionRequest, ExecutionResponse, ExecutionStatus};
 use anyhow::Result;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
-use serde::{Deserialize, Serialize};
-
-// Mirror types from execution service for deserialization
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ExecutionJob {
-    id: Uuid,
-    status: JobStatus,
-    request: CreateExecutionRequest,
-    created_at: chrono::DateTime<chrono::Utc>,
-    started_at: Option<chrono::DateTime<chrono::Utc>>,
-    completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    result: Option<JobResult>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum JobStatus {
-    Queued,
-    Running,
-    Completed,
-    Failed,
-    Timeout,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct JobResult {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
-    duration_ms: u64,
-}
 
 pub struct AppState {
-    client: Client,
-    execution_service_url: String,
+    execution_client: Arc<RwLock<ExecutionClient>>,
     // In-memory cache for MVP (will be Redis later)
     executions: Arc<RwLock<HashMap<Uuid, ExecutionResponse>>>,
 }
@@ -48,11 +16,12 @@ pub struct AppState {
 impl AppState {
     pub async fn new() -> Result<Self> {
         let execution_service_url = std::env::var("EXECUTION_SERVICE_URL")
-            .unwrap_or_else(|_| "http://localhost:8082".to_string());
+            .unwrap_or_else(|_| "http://localhost:8081".to_string());
+
+        let execution_client = ExecutionClient::new(&execution_service_url).await?;
 
         Ok(Self {
-            client: Client::new(),
-            execution_service_url,
+            execution_client: Arc::new(RwLock::new(execution_client)),
             executions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -61,43 +30,13 @@ impl AppState {
         &self,
         request: CreateExecutionRequest,
     ) -> Result<ExecutionResponse, ApiError> {
-        // Send to execution service
-        let response = self.client
-            .post(format!("{}/executions", self.execution_service_url))
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-            
-        if !response.status().is_success() {
-            return Err(ApiError::Internal(
-                anyhow::anyhow!("Execution service returned status: {}", response.status())
-            ));
-        }
+        // TODO: Get user_id from auth context
+        let user_id = "test-user".to_string();
+        let workspace_id = request.workspace_id.map(|id| id.to_string());
         
-        let job: ExecutionJob = response.json().await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-            
-        // Convert job to ExecutionResponse
-        let execution = ExecutionResponse {
-            id: job.id,
-            status: match job.status {
-                JobStatus::Queued => ExecutionStatus::Pending,
-                JobStatus::Running => ExecutionStatus::Running,
-                JobStatus::Completed => ExecutionStatus::Completed,
-                JobStatus::Failed => ExecutionStatus::Failed,
-                JobStatus::Timeout => ExecutionStatus::Failed,
-            },
-            result: job.result.map(|r| ExecutionResult {
-                exit_code: r.exit_code,
-                stdout: r.stdout,
-                stderr: r.stderr,
-                duration_ms: r.duration_ms,
-            }),
-            created_at: job.created_at,
-            started_at: job.started_at,
-            completed_at: job.completed_at,
-        };
+        // Send to execution service via gRPC
+        let mut client = self.execution_client.write().await;
+        let execution = client.create_execution(user_id, workspace_id, request).await?;
         
         // Cache the response
         {
@@ -122,46 +61,9 @@ impl AppState {
             }
         }
         
-        // Fetch from execution service
-        let response = self.client
-            .get(format!("{}/executions/{}", self.execution_service_url, id))
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-            
-        if response.status() == 404 {
-            return Err(ApiError::NotFound);
-        }
-        
-        if !response.status().is_success() {
-            return Err(ApiError::Internal(
-                anyhow::anyhow!("Execution service returned status: {}", response.status())
-            ));
-        }
-        
-        let job: ExecutionJob = response.json().await
-            .map_err(|e| ApiError::Internal(e.into()))?;
-            
-        // Convert job to ExecutionResponse
-        let execution = ExecutionResponse {
-            id: job.id,
-            status: match job.status {
-                JobStatus::Queued => ExecutionStatus::Pending,
-                JobStatus::Running => ExecutionStatus::Running,
-                JobStatus::Completed => ExecutionStatus::Completed,
-                JobStatus::Failed => ExecutionStatus::Failed,
-                JobStatus::Timeout => ExecutionStatus::Failed,
-            },
-            result: job.result.map(|r| ExecutionResult {
-                exit_code: r.exit_code,
-                stdout: r.stdout,
-                stderr: r.stderr,
-                duration_ms: r.duration_ms,
-            }),
-            created_at: job.created_at,
-            started_at: job.started_at,
-            completed_at: job.completed_at,
-        };
+        // Fetch from execution service via gRPC
+        let mut client = self.execution_client.write().await;
+        let execution = client.get_execution(id).await?;
         
         // Update cache
         {
